@@ -348,6 +348,55 @@ describe('graphi', () => {
     await server.stop();
   });
 
+  it('will error when handling subscription requests without nes clients', async () => {
+    const schema = `
+      type Person {
+        id: ID!
+        firstname: String!
+        lastname: String!
+      }
+
+      type Mutation {
+        createPerson(firstname: String!, lastname: String!): Person!
+      }
+
+      type Query {
+        person(firstname: String!): Person!
+      }
+
+      type Subscription {
+        personAdded: Person!
+      }
+    `;
+
+    const getPerson = function (args, request) {
+      expect(args.firstname).to.equal('billy');
+      expect(request.path).to.equal('/graphql');
+      return { firstname: 'billy', lastname: 'jean' };
+    };
+
+    const createPerson = function (args, request) {
+      expect(request.path).to.equal('/graphql');
+      request.server.graphql.pub('personAdded', args);
+      return args;
+    };
+
+    const resolvers = {
+      createPerson,
+      person: getPerson
+    };
+
+    const server = Hapi.server({ port: 0 });
+    await server.register(Nes);
+    await server.register({ plugin: Graphi, options: { schema, resolvers } });
+    await server.initialize();
+
+    const payload = { query: 'subscription { personAdded { lastname } }' };
+    const res = await server.inject({ method: 'POST', url: '/graphql', payload: payload });
+    expect(res.statusCode).to.equal(200);
+    expect(res.result.errors[0].message).to.contain('Must use NES compatible client');
+  });
+
   it('will error when schema is invalid', async () => {
     const schema = `
       type Person {
