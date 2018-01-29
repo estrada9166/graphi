@@ -1,10 +1,12 @@
 'use strict';
 
+const Barrier = require('cb-barrier');
 const Code = require('code');
 const GraphQL = require('graphql');
 const Hapi = require('hapi');
 const HapiAuthBearerToken = require('hapi-auth-bearer-token');
 const Lab = require('lab');
+const Nes = require('nes');
 const Scalars = require('scalars');
 const Graphi = require('../');
 
@@ -241,6 +243,144 @@ describe('graphi', () => {
     expect(res.result.data.createPerson.lastname).to.equal('jean');
   });
 
+  it('requires nes dependency when using subscription types', async () => {
+    const schema = `
+      type Person {
+        id: ID!
+        firstname: String!
+        lastname: String!
+      }
+
+      type Mutation {
+        createPerson(firstname: String!, lastname: String!): Person!
+      }
+
+      type Query {
+        person(firstname: String!): Person!
+      }
+
+      type Subscription {
+        onPerson: Person!
+      }
+    `;
+
+
+    const server = Hapi.server();
+    let err;
+
+    try {
+      await server.register({ plugin: Graphi, options: { schema } });
+      await server.initialize();
+    } catch (ex) {
+      err = ex;
+    }
+
+    expect(err).to.exist();
+    expect(err.message).to.contain('missing dependency nes');
+  });
+
+  it('will handle subscriptions over websockets', async () => {
+    const schema = `
+      type Person {
+        id: ID!
+        firstname: String!
+        lastname: String!
+      }
+
+      type Mutation {
+        createPerson(firstname: String!, lastname: String!): Person!
+      }
+
+      type Query {
+        person(firstname: String!): Person!
+      }
+
+      type Subscription {
+        personAdded(firstname: String): Person!
+      }
+    `;
+
+    const getPerson = function (args, request) {
+      expect(args.firstname).to.equal('billy');
+      expect(request.path).to.equal('/graphql');
+      return { firstname: 'billy', lastname: 'jean' };
+    };
+
+    const createPerson = function (args, request) {
+      expect(request.path).to.equal('/graphql');
+      request.server.graphql.pub('personAdded', args);
+      return args;
+    };
+
+    const resolvers = {
+      createPerson,
+      person: getPerson
+    };
+
+    const server = Hapi.server({ port: 0 });
+    await server.register(Nes);
+    await server.register({ plugin: Graphi, options: { schema, resolvers } });
+    await server.start();
+
+    const client = new Nes.Client(`ws://localhost:${server.info.port}`);
+    await client.connect();
+
+    const barrier = new Barrier();
+    const personAdded = (person) => {
+      expect(person.firstname).to.equal('billy');
+      expect(person.lastname).to.equal('jean');
+      barrier.pass();
+    };
+
+    await client.subscribe('/graphql/personAdded/billy', personAdded);
+
+    const payload1 = { query: 'mutation { createPerson(firstname: "billy", lastname: "jean") { lastname } }' };
+    const res1 = await server.inject({ method: 'POST', url: '/graphql', payload: payload1 });
+    expect(res1.statusCode).to.equal(200);
+
+    const payload2 = { query: 'mutation { createPerson(firstname: "george", lastname: "clinton") { lastname } }' };
+    const res2 = await server.inject({ method: 'POST', url: '/graphql', payload: payload2 });
+    expect(res2.statusCode).to.equal(200);
+
+    await barrier;
+
+    await client.disconnect();
+    await server.stop();
+  });
+
+  it('will error when schema is invalid', async () => {
+    const schema = `
+      type Person {
+        id: ID!
+        firstname: String!
+        lastname: String!
+      }
+
+      type Mutation {
+        createPerson(firstname: String!, lastname: String!): Person!
+      }
+    `;
+
+    const createPerson = function (args, request) {
+      expect(args.firstname).to.equal('billy');
+      expect(args.lastname).to.equal('jean');
+      expect(request.path).to.equal('/graphql');
+      return { firstname: 'billy', lastname: 'jean' };
+    };
+
+    const resolvers = {
+      createPerson
+    };
+
+    const server = Hapi.server();
+    await server.register({ plugin: Graphi, options: { schema, resolvers } });
+    await server.initialize();
+
+    const payload = { query: 'mutation { createPerson(firstname: "billy", lastname: "jean") { lastname } }' };
+    const res = await server.inject({ method: 'POST', url: '/graphql', payload });
+    expect(res.statusCode).to.equal(400);
+  });
+
   it('will error with requests that include unknown directives', async () => {
     const schema = `
       type Person {
@@ -272,6 +412,7 @@ describe('graphi', () => {
     expect(res.statusCode).to.equal(400);
     expect(res.result.message).to.contain('Unknown directive');
   });
+
 
   it('will handle graphql GET requests with invalid variables', async () => {
     const schema = `
