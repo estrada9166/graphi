@@ -1,9 +1,12 @@
 'use strict';
 
 const Hapi = require('hapi');
+const Nes = require('nes');
 const Graphi = require('.');
 
-const internals = {};
+const internals = {
+  people: {}
+};
 
 const schema = `
   type Person {
@@ -12,41 +15,48 @@ const schema = `
   }
 
   type Query {
+    people: [Person]
     person(firstname: String!): Person!
+  }
+
+  type Mutation {
+    addPerson(firstname: String!, lastname: String!): Person!
+  }
+
+  type Subscription {
+    personAdded: Person!
   }
 `;
 
+const getPeople = function (args, request) {
+  return Object.values(internals.people);
+};
+
 const getPerson = function (args, request) {
-  return new Promise((resolve) => {
-    resolve({ firstname: 'billy', lastname: 'jean' });
-  });
+  return internals.people[args.firstname];
+};
+
+const addPerson = function (args, request) {
+  request.server.graphql.pub('personAdded', args);
+  return internals.people[args.firstname] = args;
 };
 
 const resolvers = {
-  person: getPerson
+  people: getPeople,
+  person: getPerson,
+  addPerson
 };
 
 
 internals.init = async () => {
-  try {
-    const server = new Hapi.Server({ port: 8000 });
+  const server = new Hapi.Server({ port: 8000 });
 
-    await server.register({ plugin: Graphi, options: { schema, resolvers } });
+  await server.register([Nes, { plugin: Graphi, options: { schema, resolvers } }]);
+  await server.start();
 
-    await server.start();
-
-    return server;
-  } catch (err) {
-    throw err;
-  }
+  console.log(`server.info.uri ${server.info.uri}`);
+  // open http://localhost:8000/graphiql?query=%7B%20person(firstname%3A%20%22billy%22)%20%7B%20lastname%20%7D%20%7D&variables=%7B%7D
+  // curl -X POST -H "Content-Type: application/json" -d '{"query":"{person(firstname:\"billy\"){lastname}}"}' http://127.0.0.1:8000/graphql
 };
 
-internals.init()
-  .then((server) => {
-    console.log('server.info.uri ' + server.info.uri);
-    // open http://localhost:8000/graphiql?query=%7B%20person(firstname%3A%20%22billy%22)%20%7B%20lastname%20%7D%20%7D&variables=%7B%7D
-    // curl -X POST -H "Content-Type: application/json" -d '{"query":"{person(firstname:\"billy\"){lastname}}"}' http://127.0.0.1:8000/graphql
-  })
-  .catch((error) => {
-    console.log('Error: ' + error);
-  });
+internals.init();
